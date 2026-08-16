@@ -333,8 +333,7 @@ bool VideoMF::DecodeNextFrame()
 // YUV 矩阵按 m_yuvMatrix 选系数: BT.601(SD) 或 BT.709(HD)。
 // SSE2: 每 4 像素一组, pmaddwd 一次完成 298*C+409*V 类定点乘加,
 // packus 饱和链即 clamp(0-255)。与标量语义逐位一致(先整体求和
-// +128 再 >>8, 算术右移, 饱和 clamp)。运行环境限定 x86/x64
-// (SSE2 无条件可用), 不设回退分支。
+// +128 再 >>8, 算术右移, 饱和 clamp)。
 static void ConvertRowNV12ToBGRA_SSE2(uint8_t* dst, const uint8_t* yrow,
     const uint8_t* uvrow, UINT32 w, bool use601)
 {
@@ -357,16 +356,16 @@ static void ConvertRowNV12ToBGRA_SSE2(uint8_t* dst, const uint8_t* yrow,
     {
         // 低 8 字节: Y0..Y7 / U0V0U1V1U2V2U3V3(每 2 像素一对 UV)
         __m128i y8 = _mm_loadl_epi64((const __m128i*)(yrow + x));
-        __m128i uv = _mm_loadl_epi64((const __m128i*)(uvrow + (x >> 1)));
+        __m128i uv = _mm_loadl_epi64((const __m128i*)(uvrow + ((x >> 1) << 1)));
 
         // 16 位小端元素 = {V0U0,V1U1,V2U2,V3U3} -> 拆 U/V
         __m128i v8    = _mm_packus_epi16(_mm_srli_epi16(uv, 8), zero);       // {V0..V3}
         __m128i u8    = _mm_packus_epi16(_mm_and_si128(uv, _mm_set1_epi16(0xFF)), zero); // {U0..U3}
         __m128i vrep8 = _mm_unpacklo_epi8(v8, v8);     // 字节 {V0,V0,V1,V1,V2,V2,V3,V3}
         __m128i urep8 = _mm_unpacklo_epi8(u8, u8);     // 字节 {U0,U0,U1,U1,U2,U2,U3,U3}
-        __m128i c16   = _mm_unpacklo_epi8(y8, zero);   // int16 {C0..C7}
-        __m128i v16   = _mm_unpacklo_epi8(vrep8, zero); // int16 {V0,V0,V1,V1,V2,V2,V3,V3}
-        __m128i u16   = _mm_unpacklo_epi8(urep8, zero); // int16 {U0,U0,U1,U1,U2,U2,U3,U3}
+        __m128i c16   = _mm_sub_epi16(_mm_unpacklo_epi8(y8, zero), _mm_set1_epi16(16));   // int16 {C-16,...}
+        __m128i v16   = _mm_sub_epi16(_mm_unpacklo_epi8(vrep8, zero), _mm_set1_epi16(128)); // int16 {V-128,...}
+        __m128i u16   = _mm_sub_epi16(_mm_unpacklo_epi8(urep8, zero), _mm_set1_epi16(128)); // int16 {U-128,...}
         __m128i xv    = _mm_unpacklo_epi16(c16, v16);  // int16 {C0,V0,C1,V0,C2,V1,C3,V1}
         __m128i xu    = _mm_unpacklo_epi16(c16, u16);  // int16 {C0,U0,C1,U0,C2,U1,C3,U1}
 
@@ -384,14 +383,15 @@ static void ConvertRowNV12ToBGRA_SSE2(uint8_t* dst, const uint8_t* yrow,
         __m128i g8 = _mm_packus_epi16(_mm_packs_epi32(g32, g32), zero);
         __m128i b8 = _mm_packus_epi16(_mm_packs_epi32(b32, b32), zero);
 
-        // 三次交错 -> BGRA 16 字节 = 4 像素
+        // 两次交错 -> BGRA 16 字节 = 4 像素(最后一步是 16 位元素交错)
         __m128i bg  = _mm_unpacklo_epi8(b8, g8);      // {B0,G0,B1,G1,B2,G2,B3,G3}
-        __m128i ra  = _mm_unpacklo_epi8(r8, alpha);   // {R0,FF,R1,FF,R2,FF,R3,FF}
-        __m128i out = _mm_unpacklo_epi8(bg, ra);      // {B,G,R,FF} x4
+        __m128i ra  = _mm_unpacklo_epi8(r8, alpha);   // {R0,A,R1,A,R2,A,R3,A}
+        __m128i out = _mm_unpacklo_epi16(bg, ra);     // {B,G,R,A} x4
         _mm_storeu_si128((__m128i*)(dst + x * 4), out);
     }
 
     // 尾部 w%4 像素(NV12 只保证偶数宽): 标量收尾
+    dst += x * 4;
     for (; x < w; ++x)
     {
         int C = (int)yrow[x] - 16;
